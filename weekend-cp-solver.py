@@ -3,6 +3,7 @@ import csv
 import math
 import os
 from ortools.sat.python import cp_model
+from tabulate import tabulate
 
 # Constants for scoring weights
 PREFERRED_WEIGHT = 10  # Higher score for preferred slots
@@ -19,11 +20,13 @@ def validate_file_path(file_path):
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"Error: The file '{file_path}' does not exist or is not a file.")
 
-def read_csv_header(csv_file):
+def read_csv_header_and_rows(csv_file):
     """Read and return the header of the CSV file."""
     with open(csv_file, 'r') as file:
         reader = csv.reader(file)
-        return next(reader)
+        header = next(reader)
+        next(reader) # Skip an empty line
+        return header, list(reader)
 
 def count_shift_types(header):
     """Count weekend and holiday shifts based on the header of the CSV."""
@@ -48,6 +51,23 @@ def count_shift_types(header):
     print(f"Weekend shifts count: {weekend_count}")
     print(f"Holiday shifts count: {holiday_count}")
     return weekend_count, holiday_count
+
+def collect_availability(rows):
+    """Collect the availability and preferences from the rows."""
+    availables = dict()
+    preferences = dict()
+    for row in rows:
+        email = row[1]
+        for column in range(2, len(header)):
+            match row[column]:
+                case 'Meh':
+                    availables.setdefault(email, []).append(column - 2)
+                case 'Preferred':
+                    preferences.setdefault(email, []).append(column - 2)
+                    availables.setdefault(email, []).append(column - 2)
+                case _:
+                    pass
+    return availables, preferences
 
 def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count):
     """Setup the constraint programming model."""
@@ -111,108 +131,45 @@ def solve_model(model):
     status = solver.Solve(model)
     return status, solver
 
+def print_shift_assignments(assigned_slots, weekend_count, holiday_count, csv_columns):
+    """Print the shift assignments in a table format."""
+    transformed_data = {}
+    for engineer, entries in assigned_slots.items():
+        for slot, choice in entries:
+            transformed_data[slot] = {'engineer': engineer, 'choice': choice}
+    if weekend_count > 0:
+        headers = ['Dates', 'Saturday Early', 'Sunday Early', 'Saturday Late', 'Sunday Late']
+        rows = []
+        for i in range(0, weekend_count // 2, 2):
+            row = []
+            row.append(csv_columns[i].split('[')[1].split(' ')[0] + ' -> ' + csv_columns[i + 1].split('[')[1].split(' ')[0])
+            for slot in [i, i + 1, i + weekend_count // 2, i + weekend_count // 2 + 1]:
+                row.append(f'{transformed_data[slot]["engineer"]} ({transformed_data[slot]["choice"]})')
+            rows.append(row)
+        print(tabulate(rows, headers=headers))
+
+    if holiday_count > 0:
+        headers = ['Dates','Holiday Early 1', 'Holiday Early 2', 'Holiday Late 1', 'Holiday Late 2']
+        rows = []
+        for i in range(weekend_count, holiday_count // 2 + weekend_count, 2)
+            row = []
+            row.append(csv_columns[i].split('[')[1].split(' ')[0] + ' -> ' + csv_columns[i + 1].split('[')[1].split(' ')[0])
+            for slot in [i, i + 1, i + holiday_count // 2, i + holiday_count // 2 + 1]:
+                row.append(f'{transformed_data[slot]["engineer"]} ({transformed_data[slot]["choice"]})')
+            rows.append(row)
+        print(tabulate(rows, headers=headers))
+
 try:
     args = parse_arguments()
     validate_file_path(args.csv_file)
-    header = read_csv_header(args.csv_file)
+    header, rows = read_csv_header_and_rows(args.csv_file)
     weekend_count, holiday_count = count_shift_types(header)
     all_shifts = weekend_count + holiday_count
-
-    with open(args.csv_file, 'r') as file:
-        availables = dict()
-        preferences = dict()
-        unavailables = dict()
-
-        reader = csv.reader(file)
-        # Skip the second row and header
-        next(reader)
-        next(reader)
-
-        # Count the number of engineers
-        engineers_list = list(reader)
-
-        # Max shifts per engineer 
-        max_shifts_per_engineer = math.ceil(all_shifts / len(engineers_list))
-
-        # Shift numbers assigned are 0 -> (num_columns - 2)
-        for row in engineers_list:
-            email = row[1]
-            for column in range(2, len(header)):
-                match row[column]:
-                    case 'Meh':
-                        availables.setdefault(email, []).append(column - 2)
-                    case 'Preferred':
-                        preferences.setdefault(email, []).append(column - 2)
-                        availables.setdefault(email, []).append(column - 2)
-                    case 'Unavailable':
-                        unavailables.setdefault(email, []).append(column - 2)
+    max_shifts_per_engineer = math.ceil(all_shifts / len(rows))
+    availables, preferences = collect_availability(rows)
 
     model, slots = setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count)
     status, solver = solve_model(model)
-
-    def print_assignment_table(truncated_emails_assigned_slots, weekend_count, holiday_count):
-        # Print header for the table
-        print(f'\n{"Saturday Early"} | {"Sunday Early"} | {"Saturday Late"} | {"Sunday Late"}')
-        print('-' * 64)  # Print a separator line
-        # Sort and print emails by the specified order in a table format
-        for slot_group_start in range(0, weekend_count // 2, 2):
-            slot_group_end = slot_group_start + 1
-            mirror_slot_group_start = slot_group_start + weekend_count // 2
-            mirror_slot_group_end = mirror_slot_group_start + 1
-
-            # Collect emails for the current group with preference status
-            emails_for_group = {}
-            for email, slots in truncated_emails_assigned_slots.items():
-                for slot, pref_status in slots:
-                    if slot_group_start == slot:
-                        emails_for_group.setdefault("Saturday Early", []).append(f'{email}({pref_status})')
-                    if slot_group_end == slot:
-                        emails_for_group.setdefault("Sunday Early", []).append(f'{email}({pref_status})')
-                    if mirror_slot_group_start == slot:
-                        emails_for_group.setdefault("Saturday Late", []).append(f'{email}({pref_status})')
-                    if mirror_slot_group_end == slot:
-                        emails_for_group.setdefault("Sunday Late", []).append(f'{email}({pref_status})')
-
-            # Sort the emails for the current group
-            for day in emails_for_group:
-                emails_for_group[day].sort()
-
-            # Print the current row of the table
-            saturday_early_emails = " ".join(emails_for_group.get("Saturday Early", []))
-            sunday_early_emails = " ".join(emails_for_group.get("Sunday Early", []))
-            saturday_late_emails = " ".join(emails_for_group.get("Saturday Late", []))
-            sunday_late_emails = " ".join(emails_for_group.get("Sunday Late", []))
-            print(f'{saturday_early_emails:<14} | {sunday_early_emails:<14} | {saturday_late_emails:<14} | {sunday_late_emails:<14}')
-        
-        if all_shifts > weekend_count:
-            # Print header for the table
-            print(f'\n{"Holiday Early"} | {"Holiday Late"}')
-            print('-' * 64)  # Print a separator line
-            for slot_group_start in range(weekend_count // 2, (weekend_count + holiday_count) // 2, 2):
-                slot_group_end = slot_group_start + 1
-                mirror_slot_group_start = slot_group_start + holiday_count // 2
-                mirror_slot_group_end = mirror_slot_group_start + 1
-
-                # Collect emails for the current group with preference status
-                emails_for_group = {}
-                for email, slots in truncated_emails_assigned_slots.items():
-                    for slot, pref_status in slots:
-                        if slot_group_start == slot or slot_group_end == slot:
-                            emails_for_group.setdefault("Holiday Early", []).append(f'{email}({pref_status})')
-                        if mirror_slot_group_start == slot or mirror_slot_group_end == slot:
-                            emails_for_group.setdefault("Holiday Late", []).append(f'{email}({pref_status})')
-
-                # Sort the emails for the current group
-                for day in emails_for_group:
-                    emails_for_group[day].sort()
-
-                # Print the current row of the table
-                holiday_early_emails = ", ".join(emails_for_group.get("Holiday Early", []))
-                holiday_late_emails = ", ".join(emails_for_group.get("Holiday Late", []))
-                print(f'{holiday_early_emails:<28} | {holiday_late_emails:<28}')
-        
-
-
 
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         # Truncate and store emails with their assigned slots and preference status
@@ -223,8 +180,7 @@ try:
             name_parts = email.split('@')[0].split('.')
             truncated_email = f'{name_parts[0]}.{name_parts[-1][0]}'  # Corrected to use initials
             truncated_emails_assigned_slots[truncated_email] = assigned_slots
-
-        print_assignment_table(truncated_emails_assigned_slots, weekend_count, holiday_count)
+        print_shift_assignments(truncated_emails_assigned_slots, weekend_count, holiday_count, header[2:])
     else:
         print('No solution found')
 except Exception as e:
