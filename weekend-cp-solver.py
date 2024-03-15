@@ -151,7 +151,7 @@ def print_shift_assignments(assigned_slots, weekend_count, holiday_count, csv_co
     if holiday_count > 0:
         headers = ['Dates','Holiday Early 1', 'Holiday Early 2', 'Holiday Late 1', 'Holiday Late 2']
         rows = []
-        for i in range(weekend_count, holiday_count // 2 + weekend_count, 2)
+        for i in range(weekend_count, holiday_count // 2 + weekend_count, 2):
             row = []
             row.append(csv_columns[i].split('[')[1].split(' ')[0] + ' -> ' + csv_columns[i + 1].split('[')[1].split(' ')[0])
             for slot in [i, i + 1, i + holiday_count // 2, i + holiday_count // 2 + 1]:
