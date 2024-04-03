@@ -25,7 +25,6 @@ def read_csv_header_and_rows(csv_file):
     with open(csv_file, 'r') as file:
         reader = csv.reader(file)
         header = next(reader)
-        next(reader) # Skip an empty line
         return header, list(reader)
 
 def count_shift_types(header):
@@ -69,7 +68,7 @@ def collect_availability(rows):
                     pass
     return availables, preferences
 
-def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count):
+def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count):
     """Setup the constraint programming model."""
     model = cp_model.CpModel()
     slots = {email: [model.NewBoolVar(f'{email}_slot_{slot}') for slot in range(all_shifts)] for email in availables}
@@ -82,7 +81,7 @@ def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, we
     model.Maximize(total_score)
 
     # Add constraints
-    add_constraints(model, slots, max_shifts_per_engineer, weekend_count)
+    add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holiday_count)
 
     return model, slots
 
@@ -99,11 +98,15 @@ def calculate_slot_scores(all_shifts, preferences, availables):
                 slot_scores[email][slot] = AVAILABLE_WEIGHT
     return slot_scores
 
-def add_constraints(model, slots, max_shifts_per_engineer, weekend_count):
+def add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holiday_count):
     """Add constraints to the model."""
     # Prevent more than one engineer being assigned to a slot
-    for slot in range(all_shifts):
+    for slot in range(weekend_count):
         model.Add(sum(slots[email][slot] for email in slots) == 1)
+    
+    # Two engineers should be assigned to holiday slots:
+    for slot in range(weekend_count, weekend_count + holiday_count):
+        model.Add(sum(slots[email][slot] for email in slots) == 2)
 
     # Prevent an engineer being assigned more than the maximum shifts allowed
     for email in slots:
@@ -124,7 +127,10 @@ def add_constraints(model, slots, max_shifts_per_engineer, weekend_count):
                         + slots[email][slot + weekend_count // 2 + 3]
                     <= 1
                 )
-
+        # Prevent assignment of more than one shift on a given holiday
+        for slot in range(weekend_count, weekend_count + holiday_count // 2):
+            model.Add(slots[email][slot]+ slots[email][slot + holiday_count] <= 1)
+    
 def solve_model(model):
     """Solve the model and return the solver status and solution."""
     solver = cp_model.CpSolver()
@@ -136,7 +142,7 @@ def print_shift_assignments(assigned_slots, weekend_count, holiday_count, csv_co
     transformed_data = {}
     for engineer, entries in assigned_slots.items():
         for slot, choice in entries:
-            transformed_data[slot] = {'engineer': engineer, 'choice': choice}
+            transformed_data.setdefault(slot, []).append({'engineer': engineer, 'choice': choice})
     if weekend_count > 0:
         headers = ['Dates', 'Saturday Early', 'Sunday Early', 'Saturday Late', 'Sunday Late']
         rows = []
@@ -144,31 +150,37 @@ def print_shift_assignments(assigned_slots, weekend_count, holiday_count, csv_co
             row = []
             row.append(csv_columns[i].split('[')[1].split(' ')[0] + ' -> ' + csv_columns[i + 1].split('[')[1].split(' ')[0])
             for slot in [i, i + 1, i + weekend_count // 2, i + weekend_count // 2 + 1]:
-                row.append(f'{transformed_data[slot]["engineer"]} ({transformed_data[slot]["choice"]})')
+                if slot in transformed_data:
+                    row.append(f'{transformed_data[slot][0]["engineer"]} ({transformed_data[slot][0]["choice"]})')
+                else:
+                    row.append('')
             rows.append(row)
-        print(tabulate(rows, headers=headers))
-
+        print('\n' + tabulate(rows, headers=headers))
     if holiday_count > 0:
         headers = ['Dates','Holiday Early 1', 'Holiday Early 2', 'Holiday Late 1', 'Holiday Late 2']
         rows = []
-        for i in range(weekend_count, holiday_count // 2 + weekend_count, 2):
+        for i in range(weekend_count, weekend_count + holiday_count // 2):
             row = []
-            row.append(csv_columns[i].split('[')[1].split(' ')[0] + ' -> ' + csv_columns[i + 1].split('[')[1].split(' ')[0])
-            for slot in [i, i + 1, i + holiday_count // 2, i + holiday_count // 2 + 1]:
-                row.append(f'{transformed_data[slot]["engineer"]} ({transformed_data[slot]["choice"]})')
+            row.append(csv_columns[i].split('[')[1].split(' ')[0])
+            for slot in [i, i + holiday_count // 2]:
+                if slot in transformed_data:
+                    row.append(f'{transformed_data[slot][0]["engineer"]} ({transformed_data[slot][0]["choice"]})')
+                    row.append(f'{transformed_data[slot][1]["engineer"]} ({transformed_data[slot][1]["choice"]})')
+                else:
+                    row.append('')
             rows.append(row)
-        print(tabulate(rows, headers=headers))
+        print('\n' + tabulate(rows, headers=headers))
 
 try:
     args = parse_arguments()
     validate_file_path(args.csv_file)
     header, rows = read_csv_header_and_rows(args.csv_file)
     weekend_count, holiday_count = count_shift_types(header)
-    all_shifts = weekend_count + holiday_count
+    all_shifts = weekend_count + holiday_count * 2
     max_shifts_per_engineer = math.ceil(all_shifts / len(rows))
     availables, preferences = collect_availability(rows)
 
-    model, slots = setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count)
+    model, slots = setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count)
     status, solver = solve_model(model)
 
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
