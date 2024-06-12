@@ -8,6 +8,7 @@ from tabulate import tabulate
 # Constants for scoring weights
 PREFERRED_WEIGHT = 10  # Higher score for preferred slots
 AVAILABLE_WEIGHT = 1   # Lower score for just available slots
+DUMMY_EMAIL = '?@datastax.com'
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -51,7 +52,7 @@ def count_shift_types(header):
     print(f"Holiday shifts count: {holiday_count}")
     return weekend_count, holiday_count
 
-def collect_availability(rows):
+def collect_availability(rows, should_add_dummy_entries):
     """Collect the availability and preferences from the rows."""
     availables = dict()
     preferences = dict()
@@ -66,9 +67,13 @@ def collect_availability(rows):
                     availables.setdefault(email, []).append(column - 2)
                 case _:
                     pass
+    if should_add_dummy_entries:
+        for column in range(2, len(header)):
+            availables.setdefault(DUMMY_EMAIL, []).append(column - 2)
+
     return availables, preferences
 
-def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count):
+def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count, max_dummy_shifts):
     """Setup the constraint programming model."""
     model = cp_model.CpModel()
     slots = {email: [model.NewBoolVar(f'{email}_slot_{slot}') for slot in range(all_shifts)] for email in availables}
@@ -81,7 +86,7 @@ def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, we
     model.Maximize(total_score)
 
     # Add constraints
-    add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holiday_count)
+    add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holiday_count, max_dummy_shifts)
 
     return model, slots
 
@@ -98,7 +103,7 @@ def calculate_slot_scores(all_shifts, preferences, availables):
                 slot_scores[email][slot] = AVAILABLE_WEIGHT
     return slot_scores
 
-def add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holiday_count):
+def add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holiday_count, max_dummy_shifts):
     """Add constraints to the model."""
     # Prevent more than one engineer being assigned to a slot
     for slot in range(weekend_count):
@@ -110,26 +115,36 @@ def add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holida
 
     # Prevent an engineer being assigned more than the maximum shifts allowed
     for email in slots:
-        model.Add(sum(slots[email]) <= max_shifts_per_engineer)
+        if email != DUMMY_EMAIL:
+            model.Add(sum(slots[email]) == max_shifts_per_engineer)
+        else:
+            model.Add(sum(slots[email]) == max_dummy_shifts)
 
-    # Prevent assignment of more than one shift in a given weekend, as well as being assigned back to back weekends
     for email in slots:
-        for slot in range(0, weekend_count // 2, 2):  # Iterate over first half of available weekend slots (every other shift)
-            if slot + weekend_count // 2 + 3 < weekend_count:
+        if email != DUMMY_EMAIL:
+            # Prevent assignment of more than one shift in a given weekend, as well as being assigned back to back weekends
+            for slot in range(0, weekend_count // 2, 2):  # Iterate over first half of available weekend slots (every other shift)
+                if slot + weekend_count // 2 + 3 < weekend_count:
+                    model.Add(
+                        slots[email][slot]
+                            + slots[email][slot + 1]
+                            + slots[email][slot + 2]
+                            + slots[email][slot + 3]
+                            + slots[email][slot + weekend_count // 2]
+                            + slots[email][slot + weekend_count // 2 + 1]
+                            + slots[email][slot + weekend_count // 2 + 2]
+                            + slots[email][slot + weekend_count // 2 + 3]
+                        <= 1
+                    )
+            # Prevent assignment of more than one shift on a given holiday
+            for slot in range(weekend_count, weekend_count + holiday_count , 2):
                 model.Add(
                     slots[email][slot]
                         + slots[email][slot + 1]
-                        + slots[email][slot + 2]
-                        + slots[email][slot + 3]
-                        + slots[email][slot + weekend_count // 2]
-                        + slots[email][slot + weekend_count // 2 + 1]
-                        + slots[email][slot + weekend_count // 2 + 2]
-                        + slots[email][slot + weekend_count // 2 + 3]
+                        + slots[email][slot + holiday_count]
+                        + slots[email][slot + holiday_count + 1]
                     <= 1
                 )
-        # Prevent assignment of more than one shift on a given holiday
-        for slot in range(weekend_count, weekend_count + holiday_count // 2):
-            model.Add(slots[email][slot]+ slots[email][slot + holiday_count] <= 1)
     
 def solve_model(model):
     """Solve the model and return the solver status and solution."""
@@ -140,9 +155,15 @@ def solve_model(model):
 def print_shift_assignments(assigned_slots, weekend_count, holiday_count, csv_columns):
     """Print the shift assignments in a table format."""
     transformed_data = {}
+    assignment_counts = {}
     for engineer, entries in assigned_slots.items():
         for slot, choice in entries:
             transformed_data.setdefault(slot, []).append({'engineer': engineer, 'choice': choice})
+            assignment_counts[engineer] = assignment_counts.get(engineer, 0) + 1
+    # Print the number of assignments for each engineer
+    print("\nAssignments per engineer:")
+    for engineer, count in assignment_counts.items():
+        print(f"{engineer}: {count}")
     if weekend_count > 0:
         headers = ['Dates', 'Saturday Early', 'Sunday Early', 'Saturday Late', 'Sunday Late']
         rows = []
@@ -163,10 +184,14 @@ def print_shift_assignments(assigned_slots, weekend_count, holiday_count, csv_co
             row = []
             row.append(csv_columns[i].split('[')[1].split(' ')[0])
             for slot in [i, i + holiday_count // 2]:
-                if slot in transformed_data:
+                if slot in transformed_data and len(transformed_data[slot]) >= 1:
                     row.append(f'{transformed_data[slot][0]["engineer"]} ({transformed_data[slot][0]["choice"]})')
-                    row.append(f'{transformed_data[slot][1]["engineer"]} ({transformed_data[slot][1]["choice"]})')
+                    if len(transformed_data[slot]) == 2:
+                        row.append(f'{transformed_data[slot][1]["engineer"]} ({transformed_data[slot][1]["choice"]})')
+                    else:
+                        row.append('')
                 else:
+                    row.append('')
                     row.append('')
             rows.append(row)
         print('\n' + tabulate(rows, headers=headers))
@@ -177,10 +202,11 @@ try:
     header, rows = read_csv_header_and_rows(args.csv_file)
     weekend_count, holiday_count = count_shift_types(header)
     all_shifts = weekend_count + holiday_count * 2
-    max_shifts_per_engineer = math.ceil(all_shifts / len(rows))
-    availables, preferences = collect_availability(rows)
+    max_shifts_per_engineer = math.floor(all_shifts / len(rows))
+    max_dummy_shifts = all_shifts % len(rows)
+    availables, preferences = collect_availability(rows, max_dummy_shifts != 0)
 
-    model, slots = setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count)
+    model, slots = setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count, max_dummy_shifts)
     status, solver = solve_model(model)
 
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
