@@ -9,6 +9,7 @@ from tabulate import tabulate
 PREFERRED_WEIGHT = 10  # Higher score for preferred slots
 AVAILABLE_WEIGHT = 1   # Lower score for just available slots
 DUMMY_EMAIL = '?@datastax.com'
+DEBUG = False
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -92,7 +93,7 @@ def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, we
 
 def calculate_slot_scores(all_shifts, preferences, availables):
     """Calculate scores for each slot based on preferences and availability."""
-    slot_scores = {email: [0] * all_shifts for email in availables}
+    slot_scores = {email: [-100] * all_shifts for email in availables}
     for email, slots_list in preferences.items():
         for slot in slots_list:
             slot_scores[email][slot] = PREFERRED_WEIGHT
@@ -160,10 +161,11 @@ def print_shift_assignments(assigned_slots, weekend_count, holiday_count, csv_co
         for slot, choice in entries:
             transformed_data.setdefault(slot, []).append({'engineer': engineer, 'choice': choice})
             assignment_counts[engineer] = assignment_counts.get(engineer, 0) + 1
-    # Print the number of assignments for each engineer
-    print("\nAssignments per engineer:")
-    for engineer, count in assignment_counts.items():
-        print(f"{engineer}: {count}")
+    if DEBUG:
+        # Print the number of assignments for each engineer
+        print("\nAssignments per engineer:")
+        for engineer, count in assignment_counts.items():
+            print(f"{engineer}: {count}")
     if weekend_count > 0:
         headers = ['Dates', 'Saturday Early', 'Sunday Early', 'Saturday Late', 'Sunday Late']
         rows = []
@@ -213,6 +215,11 @@ try:
         # Truncate and store emails with their assigned slots and preference status
         truncated_emails_assigned_slots = {}
         for email, slots_list in availables.items():
+            if DEBUG:
+                print(email, slots_list)
+                for slot in slots[email]:
+                    if solver.Value(slot):
+                        print(f"{email} assigned to slot {slot}")
             assigned_slots = [(slot, 'P' if slot in preferences.get(email, []) else 'A') for slot in slots_list if solver.Value(slots[email][slot])]
             # Truncate email to first name initial and last name initial
             name_parts = email.split('@')[0].split('.')
