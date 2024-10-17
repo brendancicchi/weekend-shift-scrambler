@@ -10,6 +10,12 @@ PREFERRED_WEIGHT = 10  # Higher score for preferred slots
 AVAILABLE_WEIGHT = 1   # Lower score for just available slots
 DUMMY_EMAIL = '?@datastax.com'
 DEBUG = False
+# Adjust max shifts for specific individuals
+SPECIAL_CIRCUMSTANCES_BY_EMAIL = {
+    'email': {
+        'shifts': 3,
+    }
+}
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -33,8 +39,11 @@ def count_shift_types(header):
     """Count weekend and holiday shifts based on the header of the CSV."""
     weekend_count = 0
     holiday_count = 0
+    special_holiday_count = 0
     last_weekend_index = -1
-    first_holiday_index = len(header)  # Initialize to an index after the last possible index
+    # first_holiday_index = len(header)  # Initialize to an index after the last possible index
+    first_holiday_index = 0
+    first_special_index = 0
 
     for i, column_name in enumerate(header):
         if 'Weekend' in column_name:
@@ -42,16 +51,23 @@ def count_shift_types(header):
             last_weekend_index = i
         elif 'Holiday' in column_name:
             holiday_count += 1
-            if i < first_holiday_index:
+            if first_holiday_index == 0:
                 first_holiday_index = i
-
+        elif 'Special' in column_name:
+            special_holiday_count += 1
+            if first_special_index == 0:
+                first_special_index = i
+            
     # Verify that all 'Holiday' columns are after all 'Weekend' columns
     if holiday_count > 0 and first_holiday_index < last_weekend_index:
         raise ValueError("Error: There are 'Holiday' columns before 'Weekend' columns.")
+    if special_holiday_count > 0 and first_special_index < last_weekend_index:
+        raise ValueError("Error: There are 'Special' columns before 'Weekend' columns.")
 
     print(f"Weekend shifts count: {weekend_count}")
-    print(f"Holiday shifts count: {holiday_count}")
-    return weekend_count, holiday_count
+    print(f"Holiday shifts count: {holiday_count * 2}")
+    print(f"Special shifts count: {special_holiday_count * 2}")
+    return weekend_count, holiday_count, special_holiday_count
 
 def collect_availability(rows, should_add_dummy_entries):
     """Collect the availability and preferences from the rows."""
@@ -74,7 +90,7 @@ def collect_availability(rows, should_add_dummy_entries):
 
     return availables, preferences
 
-def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count, max_dummy_shifts):
+def setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count, special_holiday_count, max_dummy_shifts):
     """Setup the constraint programming model."""
     model = cp_model.CpModel()
     slots = {email: [model.NewBoolVar(f'{email}_slot_{slot}') for slot in range(all_shifts)] for email in availables}
@@ -111,12 +127,21 @@ def add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holida
         model.Add(sum(slots[email][slot] for email in slots) == 1)
     
     # Two engineers should be assigned to holiday slots:
-    for slot in range(weekend_count, weekend_count + holiday_count):
-        model.Add(sum(slots[email][slot] for email in slots) == 2)
-
+    if holiday_count > 0:
+        for slot in range(weekend_count, weekend_count + holiday_count):
+            model.Add(sum(slots[email][slot] for email in slots) == 2)
+    
+    # Two engineer should be assigned to special holiday slots:
+    if special_holiday_count > 0:
+        for slot in range(weekend_count + holiday_count, weekend_count + holiday_count + special_holiday_count):
+            model.Add(sum(slots[email][slot] for email in slots) == 2)
+    
     # Prevent an engineer being assigned more than the maximum shifts allowed
     for email in slots:
-        if email != DUMMY_EMAIL:
+        if email in SPECIAL_CIRCUMSTANCES_BY_EMAIL.keys():
+            print(f'Special circumstances for {email}')
+            model.Add(sum(slots[email]) == SPECIAL_CIRCUMSTANCES_BY_EMAIL[email]['shifts'])
+        elif email != DUMMY_EMAIL:
             model.Add(sum(slots[email]) == max_shifts_per_engineer)
         else:
             model.Add(sum(slots[email]) == max_dummy_shifts)
@@ -138,14 +163,24 @@ def add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holida
                         <= 1
                     )
             # Prevent assignment of more than one shift on a given holiday
-            for slot in range(weekend_count, weekend_count + holiday_count , 2):
-                model.Add(
-                    slots[email][slot]
-                        + slots[email][slot + 1]
-                        + slots[email][slot + holiday_count]
-                        + slots[email][slot + holiday_count + 1]
-                    <= 1
-                )
+            if holiday_count > 0:
+                for slot in range(weekend_count, weekend_count + holiday_count , 2):
+                    model.Add(
+                        slots[email][slot]
+                            + slots[email][slot + 1]
+                            + slots[email][slot + holiday_count]
+                            + slots[email][slot + holiday_count + 1]
+                        <= 1
+                    )
+            # Prevent assignment of more than one shift on a given special holiday
+            if special_holiday_count > 0:
+                for slot in range(weekend_count + holiday_count, weekend_count + holiday_count + special_holiday_count):
+                    model.Add(
+                        slots[email][slot]
+                            + slots[email][slot + special_holiday_count]
+
+                        <= 1
+                    )
     
 def solve_model(model):
     """Solve the model and return the solver status and solution."""
@@ -197,18 +232,37 @@ def print_shift_assignments(assigned_slots, weekend_count, holiday_count, csv_co
                     row.append('')
             rows.append(row)
         print('\n' + tabulate(rows, headers=headers))
+    if special_holiday_count > 0:
+        headers = ['Special Holiday Date and Time','Engineer 1', 'Engineer 2']
+        rows = []
+        for slot in range(weekend_count + holiday_count, weekend_count + holiday_count + special_holiday_count):
+            row = []
+            row.append(csv_columns[slot].split('[')[1].split(']')[0])
+            if slot in transformed_data and len(transformed_data[slot]) >= 1:
+                row.append(f'{transformed_data[slot][0]["engineer"]} ({transformed_data[slot][0]["choice"]})')
+                if len(transformed_data[slot]) == 2:
+                    row.append(f'{transformed_data[slot][1]["engineer"]} ({transformed_data[slot][1]["choice"]})')
+                else:
+                    row.append('')
+            else:
+                row.append('')
+                row.append('')
+            rows.append(row)
+        print('\n' + tabulate(rows, headers=headers))
 
 try:
     args = parse_arguments()
     validate_file_path(args.csv_file)
     header, rows = read_csv_header_and_rows(args.csv_file)
-    weekend_count, holiday_count = count_shift_types(header)
-    all_shifts = weekend_count + holiday_count * 2
+    weekend_count, holiday_count, special_holiday_count = count_shift_types(header)
+    all_shifts = weekend_count + holiday_count * 2 + special_holiday_count * 2
     max_shifts_per_engineer = math.floor(all_shifts / len(rows))
-    max_dummy_shifts = all_shifts % len(rows)
-    availables, preferences = collect_availability(rows, max_dummy_shifts != 0)
+    empty_shift_count = all_shifts % len(rows)
+    print(f"Empty shifts count: {empty_shift_count}")
+    print(f"Max shifts per engineer: {max_shifts_per_engineer}")
+    availables, preferences = collect_availability(rows, empty_shift_count != 0)
 
-    model, slots = setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count, max_dummy_shifts)
+    model, slots = setup_model(all_shifts, preferences, availables, max_shifts_per_engineer, weekend_count, holiday_count, special_holiday_count, empty_shift_count)
     status, solver = solve_model(model)
 
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
