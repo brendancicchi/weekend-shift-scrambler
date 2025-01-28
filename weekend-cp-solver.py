@@ -8,13 +8,19 @@ from tabulate import tabulate
 # Constants for scoring weights
 PREFERRED_WEIGHT = 10  # Higher score for preferred slots
 AVAILABLE_WEIGHT = 1   # Lower score for just available slots
+NON_HOLIDAY_WEIGHT = 100  # Highest score for non-holiday slots where assignment should be guaranteed
 DUMMY_EMAIL = '?@datastax.com'
 DEBUG = False
-# Adjust max shifts for specific individuals
+# Adjust max shifts or non-holidays for specific individuals
 SPECIAL_CIRCUMSTANCES_BY_EMAIL = {
-    'email': {
-        'shifts': 3,
-    }
+    # 'first.last@abc.com': {
+    #     'shifts': 1,
+    # },
+    # 'email@datastax.com': {
+    #     'shifts': 3,
+    #     'non-holiday': [24]
+    #     'override_back_to_back': True
+    # }
 }
 
 def parse_arguments():
@@ -49,14 +55,14 @@ def count_shift_types(header):
         if 'Weekend' in column_name:
             weekend_count += 1
             last_weekend_index = i
-        elif 'Holiday' in column_name:
-            holiday_count += 1
-            if first_holiday_index == 0:
-                first_holiday_index = i
         elif 'Special' in column_name:
             special_holiday_count += 1
             if first_special_index == 0:
                 first_special_index = i
+        elif 'Holiday' in column_name:
+            holiday_count += 1
+            if first_holiday_index == 0:
+                first_holiday_index = i
             
     # Verify that all 'Holiday' columns are after all 'Weekend' columns
     if holiday_count > 0 and first_holiday_index < last_weekend_index:
@@ -118,6 +124,11 @@ def calculate_slot_scores(all_shifts, preferences, availables):
             # Only update the score if it's not already marked as preferred
             if slot_scores[email][slot] != PREFERRED_WEIGHT:
                 slot_scores[email][slot] = AVAILABLE_WEIGHT
+    if SPECIAL_CIRCUMSTANCES_BY_EMAIL:
+        for email in SPECIAL_CIRCUMSTANCES_BY_EMAIL.keys():
+            if SPECIAL_CIRCUMSTANCES_BY_EMAIL[email].get('non-holiday'):
+                for slot in SPECIAL_CIRCUMSTANCES_BY_EMAIL[email]['non-holiday']:
+                    slot_scores[email][slot] = NON_HOLIDAY_WEIGHT
     return slot_scores
 
 def add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holiday_count, max_dummy_shifts):
@@ -139,8 +150,7 @@ def add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holida
     # Prevent an engineer being assigned more than the maximum shifts allowed
     for email in slots:
         if email in SPECIAL_CIRCUMSTANCES_BY_EMAIL.keys():
-            print(f'Special circumstances for {email}')
-            model.Add(sum(slots[email]) == SPECIAL_CIRCUMSTANCES_BY_EMAIL[email]['shifts'])
+            model.Add(sum(slots[email]) == SPECIAL_CIRCUMSTANCES_BY_EMAIL[email].get('shifts', max_shifts_per_engineer))
         elif email != DUMMY_EMAIL:
             model.Add(sum(slots[email]) == max_shifts_per_engineer)
         else:
@@ -149,19 +159,30 @@ def add_constraints(model, slots, max_shifts_per_engineer, weekend_count, holida
     for email in slots:
         if email != DUMMY_EMAIL:
             # Prevent assignment of more than one shift in a given weekend, as well as being assigned back to back weekends
-            for slot in range(0, weekend_count // 2, 2):  # Iterate over first half of available weekend slots (every other shift)
-                if slot + weekend_count // 2 + 3 < weekend_count:
-                    model.Add(
-                        slots[email][slot]
-                            + slots[email][slot + 1]
-                            + slots[email][slot + 2]
-                            + slots[email][slot + 3]
-                            + slots[email][slot + weekend_count // 2]
-                            + slots[email][slot + weekend_count // 2 + 1]
-                            + slots[email][slot + weekend_count // 2 + 2]
-                            + slots[email][slot + weekend_count // 2 + 3]
-                        <= 1
-                    )
+            if email in SPECIAL_CIRCUMSTANCES_BY_EMAIL.keys() and SPECIAL_CIRCUMSTANCES_BY_EMAIL[email].get('constraints') and SPECIAL_CIRCUMSTANCES_BY_EMAIL[email]['constraints'].get('override_back_to_back'):
+                for slot in range(0, weekend_count // 2, 2):  # Iterate over first half of available weekend slots (every other shift)
+                    if slot + weekend_count // 2 + 3 < weekend_count:
+                        model.Add(
+                            slots[email][slot]
+                                + slots[email][slot + 1]
+                                + slots[email][slot + weekend_count // 2]
+                                + slots[email][slot + weekend_count // 2 + 1]
+                            <= 1
+                        )
+            else:
+                for slot in range(0, weekend_count // 2, 2):  # Iterate over first half of available weekend slots (every other shift)
+                    if slot + weekend_count // 2 + 3 < weekend_count:
+                        model.Add(
+                            slots[email][slot]
+                                + slots[email][slot + 1]
+                                + slots[email][slot + 2]
+                                + slots[email][slot + 3]
+                                + slots[email][slot + weekend_count // 2]
+                                + slots[email][slot + weekend_count // 2 + 1]
+                                + slots[email][slot + weekend_count // 2 + 2]
+                                + slots[email][slot + weekend_count // 2 + 3]
+                            <= 1
+                        )
             # Prevent assignment of more than one shift on a given holiday
             if holiday_count > 0:
                 for slot in range(weekend_count, weekend_count + holiday_count , 2):
