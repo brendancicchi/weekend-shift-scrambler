@@ -279,7 +279,10 @@ try:
     all_shifts = weekend_count + holiday_count * 2 + special_holiday_count * 2
     max_shifts_per_engineer = math.floor(all_shifts / len(rows))
     empty_shift_count = all_shifts % len(rows)
-    print(f"Empty shifts count: {empty_shift_count}")
+    # Add logic for handling change in shift counts in SPECIAL_CIRCUMSTANCES_BY_EMAIL
+    for email, details in SPECIAL_CIRCUMSTANCES_BY_EMAIL.items():
+        if details.get('shifts') and details['shifts'] < max_shifts_per_engineer:
+            empty_shift_count += (max_shifts_per_engineer - details['shifts'])
     print(f"Max shifts per engineer: {max_shifts_per_engineer}")
     availables, preferences = collect_availability(rows, empty_shift_count != 0)
 
